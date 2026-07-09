@@ -1,49 +1,58 @@
 import yfinance as yf
 
-def fetch_financial_data(ticker_symbol, market_risk_premium=0.075):
-    stock = yf.Ticker(ticker_symbol)
-    
-    income_stmt = stock.financials.fillna(0)
-    balance_sheet = stock.balance_sheet.fillna(0)
-    cash_flow = stock.cashflow.fillna(0)
+import yfinance as yf
+import numpy as np
+
+def fetch_financial_data(ticker):
+    stock = yf.Ticker(ticker)
+    income_stmt = stock.financials
+    balance_sheet = stock.balance_sheet
+    cash_flow = stock.cashflow
     info = stock.info
     
-    market_price = info.get('currentPrice', info.get('previousClose', 2500))
-    shares_out = info.get('sharesOutstanding', 1)
-    market_cap = market_price * shares_out
-    beta = info.get('beta', 1.0)
+    data = {}
     
+    # Extract Base Metrics
     try:
-        in_10y = yf.Ticker("^IN10YT=RR") 
-        risk_free_rate = in_10y.history(period="1d")['Close'].iloc[-1] / 100
-    except Exception:
-        risk_free_rate = 0.071 
+        data['total_revenue'] = income_stmt.loc['Total Revenue'].iloc[0]
+        data['ebit'] = income_stmt.loc['EBIT'].iloc[0]
+        data['ebit_margin'] = data['ebit'] / data['total_revenue']
         
-    try:
-        total_revenue = income_stmt.loc['Total Revenue'].iloc[0]
-        ebit = income_stmt.loc['EBIT'].iloc[0]
-        tax_provision = income_stmt.loc['Tax Provision'].iloc[0]
-        pretax_income = income_stmt.loc['Pretax Income'].iloc[0]
+        # FIX: Bound the tax rate between 0% and 35% to prevent one-off distortions
+        raw_tax_rate = income_stmt.loc['Tax Provision'].iloc[0] / income_stmt.loc['Pretax Income'].iloc[0]
+        data['tax_rate'] = max(0.0, min(raw_tax_rate, 0.35))
         
-        total_debt = balance_sheet.loc['Total Debt'].iloc[0] if 'Total Debt' in balance_sheet.index else info.get('totalDebt', 0)
-        cash_and_equiv = balance_sheet.loc['Cash And Cash Equivalents'].iloc[0] if 'Cash And Cash Equivalents' in balance_sheet.index else info.get('totalCash', 0)
-        
-        depreciation = cash_flow.loc['Depreciation And Amortization'].iloc[0] if 'Depreciation And Amortization' in cash_flow.index else ebit * 0.1
-        capex = abs(cash_flow.loc['Capital Expenditure'].iloc[0]) if 'Capital Expenditure' in cash_flow.index else total_revenue * 0.05
-        
-        prev_revenue = income_stmt.loc['Total Revenue'].iloc[1]
-        historical_growth = (total_revenue / prev_revenue) - 1 if prev_revenue else 0.08
+        # FIX: Multi-Year Smoothing for Historical Growth (3-Year CAGR)
+        if len(income_stmt.columns) >= 4:
+            revenue_yr3 = income_stmt.loc['Total Revenue'].iloc[3]
+            data['historical_growth'] = (data['total_revenue'] / revenue_yr3)**(1/3) - 1
+        else:
+            revenue_yr1 = income_stmt.loc['Total Revenue'].iloc[1]
+            data['historical_growth'] = (data['total_revenue'] / revenue_yr1) - 1
 
+        data['total_debt'] = balance_sheet.loc['Total Debt'].iloc[0] if 'Total Debt' in balance_sheet.index else 0
+        data['cash'] = balance_sheet.loc['Cash And Cash Equivalents'].iloc[0] if 'Cash And Cash Equivalents' in balance_sheet.index else 0
+        data['shares_outstanding'] = info.get('sharesOutstanding', 1)
+        
+        # FIX: Dynamic Cost of Debt (Interest Expense / Total Debt)
+        if 'Interest Expense' in income_stmt.index and data['total_debt'] > 0:
+            interest_expense = abs(income_stmt.loc['Interest Expense'].iloc[0])
+            data['cost_of_debt'] = interest_expense / data['total_debt']
+        else:
+            data['cost_of_debt'] = 0.085 # Standard fallback proxy
+
+        data['beta'] = info.get('beta', 1.0)
+        data['capex'] = abs(cash_flow.loc['Capital Expenditure'].iloc[0]) if 'Capital Expenditure' in cash_flow.index else data['total_revenue'] * 0.05
+        data['depreciation'] = cash_flow.loc['Depreciation And Amortization'].iloc[0] if 'Depreciation And Amortization' in cash_flow.index else data['total_revenue'] * 0.04
+        
+        # Risk Free Rate handling (Fallback to 7.1% for India if ticker fails)
+        try:
+            bond = yf.Ticker("^IN10YT=RR")
+            data['risk_free_rate'] = bond.history(period="1d")['Close'].iloc[-1] / 100
+        except:
+            data['risk_free_rate'] = 0.071
+            
     except Exception as e:
-        raise RuntimeError(f"Failed to parse financials: {str(e)}")
-
-    tax_rate = tax_provision / pretax_income if pretax_income > 0 else 0.25
-    ebit_margin = ebit / total_revenue if total_revenue > 0 else 0.15
-    
-    return {
-        'market_price': market_price, 'shares_out': shares_out, 'market_cap': market_cap,
-        'beta': beta, 'risk_free_rate': risk_free_rate, 'total_revenue': total_revenue,
-        'ebit': ebit, 'tax_rate': tax_rate, 'ebit_margin': ebit_margin,
-        'total_debt': total_debt, 'cash': cash_and_equiv, 'depreciation': depreciation,
-        'capex': capex, 'historical_growth': historical_growth
-    }
+        print(f"Data parsing error for {ticker}: {e}")
+        
+    return data
